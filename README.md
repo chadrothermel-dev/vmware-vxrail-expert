@@ -150,3 +150,7 @@ Built from research of Broadcom TechDocs and Knowledge Base articles, Dell VxRai
 ## Disclaimer
 
 Not affiliated with or endorsed by Broadcom, VMware, Dell Technologies or Microsoft. All product names are trademarks of their owners. Provided as-is; you're responsible for changes made to your environment.
+
+## License
+
+[MIT](LICENSE).
