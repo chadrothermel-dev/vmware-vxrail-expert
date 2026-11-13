@@ -20,6 +20,9 @@
 .PARAMETER EventTime
     When the problem happened, in your local time unless -EventTimeIsUtc is set.
     ESXi and vCenter logs are written in UTC; the script converts for you.
+    The window treats every log timestamp as UTC. Some logs (VxRail Manager, SDDC Manager, Aria
+    appliances, guest OS logs) may be written in local time - for those, widen -WindowMinutes by
+    your UTC offset or leave -EventTime out.
 
 .PARAMETER WindowMinutes
     Minutes either side of EventTime to keep. Default 30.
@@ -40,6 +43,10 @@
 .PARAMETER MaskIPs
     Replace IPv4 addresses with consistent tokens (IP-001, IP-002 ...). The mapping is written to
     ip-map.csv in the output folder so you can translate answers back; don't share that file.
+
+.PARAMETER IncludeGenericErrors
+    Also keep any line containing a generic error/warning/failed marker. Off by default because it
+    keeps most of hostd/vpxd and produces far more output; use it with -EventTime and a short window.
 
 .PARAMETER OutDir
     Output folder. Default: .\triage-<timestamp> next to where you run the script.
@@ -65,6 +72,7 @@ param(
     [int]$MaxChunkChars = 25000,
     [string[]]$Category,
     [switch]$MaskIPs,
+    [switch]$IncludeGenericErrors,
     [string]$OutDir
 )
 
@@ -75,20 +83,21 @@ $ErrorActionPreference = 'Stop'
 # Signature catalogue. Case-insensitive regex. Keep in sync with references/log-triage.md.
 # ---------------------------------------------------------------------------
 $Signatures = [ordered]@{
-    storage      = 'H:0x[1-9a-f]|D:0x[1-9a-f]|Valid sense data|\bAPD\b|PERM LOSS|permanently (unavailable|inaccessible)|PDL|APD Notify|is blocked\. Not starting I/O|no more open connections|performance has deteriorated|Lost access to volume|Successfully restored access|ATS Miscompare|redundancy (lost|degraded)|path .* (dead|changing)|corrupt'
-    psod         = 'PSOD|Panic|Exception (13|14)|#PF|#GP|LINT1|\bNMI\b|\bMCE\b|Machine Check|heartbeat for|Spin count exceeded|TLB invalidate|vmkernel-zdump'
-    network      = 'NIC Link is (Down|Up)|linkstate|Duplicate IP|out of sync|lacp|vmotion.*(fail|timeout|error)|Migrate:.*(fail|error)|Failed waiting for data|switchover time'
-    host         = 'not responding|hostd.*(hang|timeout|crash)|Timed out|watchdog|Lockdown|ramdisk .* (is )?full|No space left on device'
-    vsan         = 'permanent error|DISK_UNDER_PERM_ERROR|LogCong|Congestion|IMPENDING FAILURE|devicewithhighlatency|lsom\.diskerror|devicerepair|CONTROLLER_STATE_FAILED|partition|unicast|CMMDS|inaccessible|DDH'
-    ha           = 'UninitializedState|GenericFdmFault|Election|isolat|fdm.*(error|fail)|insufficient (failover )?resources'
-    vcenter      = '-- ERROR task-|vim\.fault|503 Service Unavailable|no healthy upstream|Failed to connect to endpoint|failedSteps|firstboot.*(error|fail)|Encountered an internal error|ODBC error|OutOfMemoryError'
-    certificates = 'certificate|SSLHandshake|expired|Signing certificate is not valid|thumbprint|trust anchor|PKIX'
-    space        = 'No space left on device|disk (is )?full|is full|inode|ramdisk'
-    vxrail       = 'microservice\.|func_|refresh token|precheck|pre-check|VxVerify|lockbox|loudmouth|PTAgent|platformsvc|ExpansionValidation|Failed to login by session cookie|MYSTIC\d+|VXR\d+'
-    vcf          = 'domainmanager|operationsmanager|lcm.*(error|fail)|depot|dl\.broadcom\.com|IDENTITY_INTERNAL_SERVER_ERROR|password.*(expired|rotation|remediat)'
-    nsx          = 'tunnel.*down|BFD.*down|TEP|geneve|password-expiration|transport node|nsx.*(error|fail)'
+    storage      = 'H:0x[1-9a-f]|D:0x[1-9a-f]|Valid sense data|\bAPD\b|PERM LOSS|permanently (unavailable|inaccessible)|\bPDL\b|is blocked\. Not starting I/O|no more open connections|performance has deteriorated|Lost access to volume|Successfully restored access|ATS Miscompare|redundancy (lost|degraded)|\bpath\b.*\b(dead|changing to)\b|\bcorrupt(ed|ion)?\b'
+    psod         = '\bPSOD\b|\bPanic\b|Exception (13|14)|#PF|#GP|\bLINT1\b|\bNMI\b|\bMCE\b|Machine Check|didn''t have a heartbeat|no heartbeat|Spin count exceeded|TLB invalidate|vmkernel-zdump'
+    network      = 'NIC Link is (Down|Up)|linkstate|Duplicate IP|out of sync|\blacp\b.*\b(down|fail|timeout|error)|vmotion.*\b(fail|timeout|error)|Migrate:.*\b(fail|error)|Failed waiting for data|switchover time'
+    host         = 'not responding|hostd.*\b(hang|hung|timeout|crash)|\bTimed out\b|watchdog.*\b(restart|fail)|ramdisk .*full|No space left on device'
+    vsan         = 'permanent error|DISK_UNDER_PERM_ERROR|LogCong|Congestion|IMPENDING FAILURE|devicewithhighlatency|lsom\.diskerror|devicerepair|CONTROLLER_STATE_FAILED|\b(vsan|cluster|network)\b.*\bpartition(ed)?\b|\bpartition(ed)?\b.*\b(vsan|cluster|network)\b|unicast.*\b(fail|missing|not configured)|\binaccessible\b|\bDDH\b'
+    ha           = 'UninitializedState|GenericFdmFault|\bisolated\b|isolation (address|response)|fdm.*\b(error|fail)|insufficient (failover )?resources|ClusterElection'
+    vcenter      = '-- ERROR task-|vim\.fault|503 Service Unavailable|no healthy upstream|Failed to connect to endpoint|failedSteps|firstboot.*\b(error|fail)|Encountered an internal error|ODBC error|OutOfMemoryError'
+    certificates = 'certificate.*\b(expired|expir\w*|invalid|not valid|mismatch|untrusted|fail\w*|error)\b|SSLHandshake|Signing certificate is not valid|thumbprint.*\b(mismatch|invalid)\b|trust anchor|PKIX|\bexpired\b'
+    space        = 'No space left on device|disk (is )?full|\bis full\b|inode.*\b(exhaust\w*|full|no free)\b|ramdisk .*full'
+    vxrail       = 'func_\S+.*\b(fail\w*|error|exception)\b|microservice\.\S+.*\b(ERROR|Exception|failed)\b|refresh token|pre-?check.*\b(fail\w*|error)\b|VxVerify.*\b(fail|warn)|lockbox.*\b(fail|error|mismatch)|loudmouth.*\b(fail|error)|PTAgent.*\b(fail|error|timeout)|platformsvc.*\b(fail|error)|ExpansionValidation|Failed to login by session cookie|\bMYSTIC\d+|\bVXR\d+'
+    vcf          = '(domainmanager|operationsmanager|lcm).*\b(ERROR|Exception|failed)\b|depot.*\b(error|fail\w*|unable)\b|dl\.broadcom\.com.*\b(fail\w*|error|unable|403|401)\b|IDENTITY_INTERNAL_SERVER_ERROR|password.*\b(expired|rotation fail\w*|remediat\w*)'
+    nsx          = 'tunnel.*\bdown\b|\bBFD\b.*\bdown\b|\bTEPs?\b.*\b(down|fail\w*|unreachable|faulty)\b|Faulty TEP|password-expiration|transport node.*\b(fail\w*|down|degraded)\b|\bnsx\w*.*\b(error|fail\w*)\b'
 }
-# Universal severity markers, matched on top of the categories.
+# Generic severity markers. Only used with -IncludeGenericErrors, because they match a large share
+# of routine hostd/vpxd lines and would flood the output.
 $SeverityPattern = '\b(Er|Cr|Al|Em)\(\d+\)|\berror\b|\bwarning\b|\bfailed\b|\bfatal\b'
 
 if ($Category) {
@@ -151,9 +160,9 @@ if (Test-Path -LiteralPath $resolved -PathType Container) {
 
 # Nested bundles (two levels is enough for vc-support → host bundles).
 for ($depth = 0; $depth -lt 2; $depth++) {
-    $nested = Get-ChildItem -LiteralPath $scanRoot -Recurse -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match '\.(tgz|tar\.gz|tar)$' -and $_.Length -gt 0 }
-    if (-not $nested) { break }
+    $nested = @(Get-ChildItem -LiteralPath $scanRoot -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '\.(tgz|tar\.gz|tar)$' -and $_.Length -gt 0 })
+    if ($nested.Count -eq 0) { break }
     foreach ($n in $nested) {
         $dest = Join-Path $n.DirectoryName ($n.Name -replace '\.(tgz|tar\.gz|tar)$', '_extracted')
         if (Test-Path -LiteralPath $dest) { continue }
@@ -166,12 +175,12 @@ for ($depth = 0; $depth -lt 2; $depth++) {
 # ---------------------------------------------------------------------------
 # Candidate files: logs, rotated logs, and a few known JSON status files.
 # ---------------------------------------------------------------------------
-$files = Get-ChildItem -LiteralPath $scanRoot -Recurse -File -ErrorAction SilentlyContinue | Where-Object {
+$files = @(Get-ChildItem -LiteralPath $scanRoot -Recurse -File -ErrorAction SilentlyContinue | Where-Object {
     ($_.Name -match '\.(log|txt|out)(\.\d+)?(\.gz)?$' -or
-     $_.Name -match '^(vmkernel|vobd|vmkwarning|hostd|vpxa|fdm|syslog|messages|clomd|vsanmgmt|vsandevicemonitord)' -or
+     $_.Name -match '^(vmkernel|vobd|vmkwarning|vmksummary|hostd|vpxa|fdm|syslog|messages|clomd|vsanmgmt|vsandevicemonitord|vsansystem|osfsd|lifecycle|esxupdate|loadESX)' -or
      $_.Name -match '^(firstbootStatus|fbInstall)\.json$') -and $_.Length -gt 0
-}
-if (-not $files) { throw "No log files found under $scanRoot." }
+})
+if ($files.Count -eq 0) { throw "No log files found under $scanRoot." }
 Write-Host "Scanning $($files.Count) files ..." -ForegroundColor Cyan
 
 function Open-LogReader {
@@ -230,7 +239,7 @@ foreach ($f in $files) {
             foreach ($k in $compiled.Keys) {
                 if ($compiled[$k].IsMatch($line)) { $counts[$k]++; $hit = $true }
             }
-            if (-not $hit -and -not $Category -and $severityRx.IsMatch($line)) { $hit = $true }
+            if (-not $hit -and $IncludeGenericErrors -and $severityRx.IsMatch($line)) { $hit = $true }
 
             if ($hit) {
                 if ($lineNo - $lastEmitted -gt $Context + 1 -and $kept.Count -gt 0) { $kept.Add('  ...') }
@@ -307,6 +316,9 @@ if ($workRoot) { Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction
 
 Write-Host ''
 Write-Host "Done. $($written.Count) file(s) in $OutDir" -ForegroundColor Green
+if ($written.Count -gt 10) {
+    Write-Warning "That's a lot to upload. Narrow it with -EventTime (and -WindowMinutes) or -Category, and start with triage-001.txt - the busiest files come first."
+}
 $summary | Sort-Object SignatureHits -Descending | Select-Object -First 10 File, KeptLines, SignatureHits | Format-Table -AutoSize
 Write-Host 'Next: upload triage-001.txt (and more if needed) to Copilot with the time of the event and what changed before it.'
 if ($MaskIPs) { Write-Host 'ip-map.csv maps tokens back to real IPs. Keep it local.' -ForegroundColor Yellow }

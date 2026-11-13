@@ -44,6 +44,8 @@ The same skill folder works across hosts. Pick one.
 2. In Microsoft 365 Copilot Chat: **Agents** → **More agents** → drop-down next to **Add** → **Upload skill**.
 3. Upload the zip. Copilot can pick the skill automatically when it's relevant, or you can select it.
 
+If you don't see **Upload skill**, your admin hasn't enabled skills for your tenant — use Option 2 or ask them.
+
 ### Option 2 — Agent Builder agent (shareable inside your tenant)
 
 Needs a Microsoft 365 Copilot license, or pay-as-you-go enabled for Copilot Studio.
@@ -73,7 +75,7 @@ Copy-Item -Recurse .\skills\vmware-vxrail-expert $HOME\.copilot\skills\
 
 ### Option 5 — Claude
 
-Copy `skills/vmware-vxrail-expert` to `~/.claude/skills/` (Claude Code) or upload the zip as a skill on claude.ai.
+Copy `skills/vmware-vxrail-expert` to `~/.claude/skills/` (Claude Code). For claude.ai, zip the `vmware-vxrail-expert` folder itself (the `dist` zip has `SKILL.md` at the root, which is the layout Copilot needs).
 
 ---
 
@@ -91,7 +93,9 @@ Copy `skills/vmware-vxrail-expert` to `~/.claude/skills/` (Claude Code) or uploa
 .\tools\Invoke-LogTriage.ps1 -Path .\vc-support.tgz -Category vcenter,certificates -MaskIPs
 ```
 
-Then upload `triage-001.txt` to Copilot and say when it happened and what changed before it. Categories: `storage, psod, network, host, vsan, ha, vcenter, certificates, space, vxrail, vcf, nsx`. Works in PowerShell 7+ and Windows PowerShell 5.1; needs `tar` (built into Windows 10/11, macOS, Linux).
+Then upload `triage-001.txt` to Copilot and say when it happened and what changed before it. Categories: `storage, psod, network, host, vsan, ha, vcenter, certificates, space, vxrail, vcf, nsx`. Add `-IncludeGenericErrors` to also keep every generic error/warning line (much more output). Works in PowerShell 7+ and Windows PowerShell 5.1; needs `tar` (built into Windows 10/11, macOS, Linux).
+
+**Timezones:** the time window treats log timestamps as UTC, which is right for ESXi and vCenter. VxRail Manager, SDDC Manager and appliance logs may be in local time — widen `-WindowMinutes` by your UTC offset or skip `-EventTime` for those.
 
 ---
 
