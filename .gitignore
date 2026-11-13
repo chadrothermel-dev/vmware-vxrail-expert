@@ -1,0 +1,14 @@
+# Output of tools/Invoke-LogTriage.ps1 — may contain real infrastructure data
+triage-*/
+ip-map.csv
+summary.csv
+
+# Support bundles
+*.tgz
+*.tar
+*.tar.gz
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
